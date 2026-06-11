@@ -1,0 +1,4 @@
+customtkinter==5.2.2
+pandas
+openpyxl
+selenium
