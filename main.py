@@ -226,12 +226,19 @@ class App(ctk.CTk):
 
         def cid(x):
             s = str(x).strip()
-            return s[:-2] if s.endswith(".0") else s
+            if s.endswith(".0"):
+                s = s[:-2]
+            return re.sub(r"\D", "", s)
 
         mob_map, note_map = {}, {}
         for _, r in mob.iterrows():
             pid = cid(r["id"])
-            mob_map[pid] = normalize_mobile(r["mobile"], cc)
+            nums = [normalize_mobile(x, cc) for x in re.split(r"[,/;\n]+", str(r["mobile"])) if re.sub(r"\D", "", str(x))]
+            nums = [n for n in nums if n]
+            mob_map.setdefault(pid, [])
+            for n in nums:
+                if n not in mob_map[pid]:
+                    mob_map[pid].append(n)
             if has_note and pd.notna(r.get("note")) and str(r.get("note")).strip():
                 note_map[pid] = str(r["note"]).strip()
 
@@ -254,13 +261,21 @@ class App(ctk.CTk):
                     p["date"] = str(d)
 
         no_mobile = []
+        expanded = []
         for pid, p in patients.items():
-            p["mobile"] = mob_map.get(pid, "")
             p["note"] = note_map.get(pid, "")
-            if not p["mobile"]:
+            nums = mob_map.get(pid, [])
+            if not nums:
                 no_mobile.append(p["name"] or pid)
-        self.patients = [p for p in patients.values() if p["mobile"]]
-        self.patients.sort(key=lambda p: p["name"])
+                continue
+            for j, n in enumerate(nums, 1):
+                e = dict(p)
+                e["mobile"] = n
+                e["slot"] = f"{j}/{len(nums)}" if len(nums) > 1 else ""
+                expanded.append(e)
+        self.patients = expanded
+        self.patients.sort(key=lambda p: (p["name"], p["mobile"]))
+        multi = sum(1 for p in self.patients if p["slot"])
 
         known = {pp["name"] for pp in self.settings["parameters"]}
         new_labs = sorted({l for p in patients.values() for l in p["labs"]} - known)
@@ -273,8 +288,9 @@ class App(ctk.CTk):
             self.refresh_rec_params()
 
         out.insert("end", f"Patients in lab file: {len(patients)}\n")
-        out.insert("end", f"Matched with a mobile number: {len(self.patients)}\n")
-        out.insert("end", f"Patients with notes: {sum(1 for p in self.patients if p['note'])}\n")
+        out.insert("end", f"Message slots (one per number): {len(self.patients)}\n")
+        out.insert("end", f"Numbers belonging to multi-number patients: {multi}\n")
+        out.insert("end", f"Patients with notes: {len({p['id'] for p in self.patients if p['note']})}\n")
         if new_labs:
             out.insert("end", f"New lab parameters detected and added to Ranges: {', '.join(new_labs)}\n")
         if no_mobile:
@@ -282,8 +298,9 @@ class App(ctk.CTk):
             for n in no_mobile:
                 out.insert("end", f"   - {n}\n")
         out.insert("end", "\nPreview (name | normalized number | labs | note?):\n")
-        for p in self.patients[:200]:
-            out.insert("end", f"   {p['name']} | {p['mobile']} | {len(p['labs'])} labs | {'note' if p['note'] else '-'}\n")
+        for p in self.patients[:400]:
+            sl = f" [{p['slot']}]" if p.get("slot") else ""
+            out.insert("end", f"   {p['name']}{sl} | {p['mobile']} | {len(p['labs'])} labs | {'note' if p['note'] else '-'}\n")
         self.refresh_send_list()
 
     # ---------------- Tab 2: Ranges ----------------
@@ -509,13 +526,13 @@ class App(ctk.CTk):
         self.refresh_send_list()
 
     def already_sent_ids(self):
-        ids = set()
+        keys = set()
         if os.path.exists(LOG_FILE):
             with open(LOG_FILE, "r", encoding="utf-8") as fh:
                 for row in csv.reader(fh):
                     if len(row) >= 5 and row[4] == "sent":
-                        ids.add(row[0])
-        return ids
+                        keys.add(row[0] + "|" + row[2])
+        return keys
 
     def log_send(self, p, status):
         new = not os.path.exists(LOG_FILE)
@@ -536,11 +553,11 @@ class App(ctk.CTk):
             return
         sent = self.already_sent_ids()
         self.send_log.delete("1.0", "end")
-        pend = [p for p in self.patients if p["id"] not in sent]
+        pend = [p for p in self.patients if p["id"] + "|" + p["mobile"] not in sent]
         self.send_log.insert("end", f"Loaded patients with mobile: {len(self.patients)} | Already sent: {len(self.patients)-len(pend)} | Pending: {len(pend)}\n")
         self.send_log.insert("end", "-" * 80 + "\n")
         for p in self.patients:
-            st = "SENT" if p["id"] in sent else "pending"
+            st = "SENT" if p["id"] + "|" + p["mobile"] in sent else "pending"
             self.send_log.insert("end", f"[{st}] {p['name']} - {p['mobile']}\n")
 
     def log_line(self, txt):
@@ -576,7 +593,7 @@ class App(ctk.CTk):
         if not self.save_send_settings():
             return
         sent = self.already_sent_ids()
-        todo = [p for p in self.patients if p["id"] not in sent][: self.settings["max_per_session"]]
+        todo = [p for p in self.patients if p["id"] + "|" + p["mobile"] not in sent][: self.settings["max_per_session"]]
         if not todo:
             messagebox.showinfo("Done", "No pending patients.")
             return
